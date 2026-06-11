@@ -1,6 +1,8 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 import logging
 import os
-from dotenv import load_dotenv
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 
 from handlers.start import setup_conv_handler, profile_conv_handler
@@ -8,7 +10,6 @@ from handlers.ir import new_ir_conv_handler
 from handlers.dashboard import dashboard, view_report, view_action_callback, update_conv_handler
 from handlers.medevac import medevac_conv_handler
 
-load_dotenv()
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
 
