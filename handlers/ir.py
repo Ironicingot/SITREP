@@ -22,9 +22,10 @@ from utils import format_report_preview, format_full_report
     ENTERING_DATETIME,
     ENTERING_LOCATION,
     ENTERING_DESCRIPTION,
+    CONFIRM_TRANSCRIPT,
     ENTERING_ADDITIONAL,
     CONFIRMING_REPORT,
-) = range(7)
+) = range(8)
 
 INCIDENT_TYPES = [
     ("🧠 IMH Incident", "IMH Incident"),
@@ -56,8 +57,16 @@ def confirm_keyboard():
     ])
 
 
+def transcript_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Looks good", callback_data="tr_ok"),
+            InlineKeyboardButton("🔄 Redo voice note", callback_data="tr_redo"),
+        ]
+    ])
+
+
 async def require_profile(update: Update) -> dict | None:
-    """Check user has a profile. Returns user dict or None."""
     user = get_user(update.effective_user.id)
     if not user:
         await update.message.reply_text(
@@ -128,8 +137,7 @@ async def enter_datetime(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["time"] = parts[1]
 
     await update.message.reply_text(
-        f"✅ *{parts[0]}, {parts[1]}H*\n\n"
-        "Location of incident?",
+        f"✅ *{parts[0]}, {parts[1]}H*\n\nLocation of incident?",
         parse_mode="Markdown",
     )
     return ENTERING_LOCATION
@@ -137,31 +145,30 @@ async def enter_datetime(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def enter_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["location"] = update.message.text.strip()
-    profile = context.user_data["profile"]
 
     await update.message.reply_text(
         f"✅ *{context.user_data['location']}*\n\n"
         "━━━━━━━━━━━━━━━━\n"
         "💡 *Describe what happened*\n\n"
-        "Type in shorthand, point form, or broken English — anything goes.\n"
-        "Include: what happened, times, who was involved, where they went, outcome, MC dates.\n\n"
-        "🎙️ *Voice notes supported* — just send a voice message.\n\n"
-        "*Example:*\n"
-        "`3sg sean 1816 felt blurred vision faint asked pc rso. went ntfgh 2038 ct scan done awaiting result.`",
+        "Shorthand or broken English is fine.\n"
+        "Include: times, who was involved, where they went, outcome, MC dates.\n\n"
+        "🎙️ *Send a voice note* — or type it out below.\n\n"
+        "*Example (text):*\n"
+        "`3sg sean 1816 blurred vision faint, asked pc rso. ntfgh 2038 ct scan awaiting result.`",
         parse_mode="Markdown",
     )
     return ENTERING_DESCRIPTION
 
 
 async def enter_description_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle text description input."""
+    """Handle typed description."""
     context.user_data["raw_dump"] = update.message.text.strip()
     return await _ask_additional(update, context)
 
 
 async def enter_description_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle voice note input — transcribe with Groq Whisper."""
-    await update.message.reply_text("🎙️ Transcribing your voice note...")
+    """Handle voice note — transcribe with Groq Whisper, then confirm before proceeding."""
+    await update.message.reply_text("🎙️ *Transcribing your voice note...*", parse_mode="Markdown")
 
     voice = update.message.voice
     file = await context.bot.get_file(voice.file_id)
@@ -169,35 +176,95 @@ async def enter_description_voice(update: Update, context: ContextTypes.DEFAULT_
     with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
         tmp_path = tmp.name
 
-    await file.download_to_drive(tmp_path)
-
     try:
+        await file.download_to_drive(tmp_path)
         transcript = transcribe_voice(tmp_path)
+
+        if not transcript or len(transcript.strip()) < 5:
+            await update.message.reply_text(
+                "⚠️ Transcript came back empty — the voice note may have been too short or unclear.\n\n"
+                "Please *type* what happened instead, or send a longer voice note.",
+                parse_mode="Markdown",
+            )
+            return ENTERING_DESCRIPTION
+
         context.user_data["raw_dump"] = transcript
 
+        # Show transcript and WAIT for user confirmation before proceeding
         await update.message.reply_text(
-            f"✅ *Transcribed:*\n_{transcript}_\n\n"
-            "If this looks wrong, send another voice note or type it out.",
+            "✅ *Transcribed — does this look right?*\n\n"
+            f"_{transcript}_\n\n"
+            "━━━━━━━━━━━━━━━━\n"
+            "Tap ✅ to continue, or 🔄 to send a new voice note.\n"
+            "You can also *type a correction* if something was missed.",
+            reply_markup=transcript_keyboard(),
             parse_mode="Markdown",
         )
-        return await _ask_additional(update, context)
+        return CONFIRM_TRANSCRIPT
+
     except Exception as e:
         await update.message.reply_text(
-            f"⚠️ Transcription failed: {e}\n\nPlease type out what happened instead."
+            f"⚠️ *Transcription failed.*\n\n`{e}`\n\n"
+            "Please *type* what happened instead.",
+            parse_mode="Markdown",
         )
         return ENTERING_DESCRIPTION
+
     finally:
-        os.unlink(tmp_path)
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+async def confirm_transcript(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle user confirming or redoing the transcript."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "tr_redo":
+        await query.edit_message_text(
+            "🎙️ Send a new voice note — or type what happened:"
+        )
+        context.user_data.pop("raw_dump", None)
+        return ENTERING_DESCRIPTION
+
+    if query.data == "tr_ok":
+        await query.edit_message_text(
+            f"✅ *Captured:*\n_{context.user_data['raw_dump']}_",
+            parse_mode="Markdown",
+        )
+        # Now ask for additional info
+        await query.message.reply_text(
+            "━━━━━━━━━━━━━━━━\n"
+            "A few more optional details.\n"
+            "_(Send a dash — to skip any field)_\n\n"
+            "*[1/4] Follow-up action:*\n"
+            "e.g. `2LT TAN will update BDO after appt on 080626`",
+            parse_mode="Markdown",
+        )
+        context.user_data["additional_step"] = 0
+        return ENTERING_ADDITIONAL
+
+
+async def confirm_transcript_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User typed a correction to the transcript."""
+    context.user_data["raw_dump"] = update.message.text.strip()
+    await update.message.reply_text(
+        f"✅ *Updated:*\n_{context.user_data['raw_dump']}_",
+        parse_mode="Markdown",
+    )
+    return await _ask_additional(update, context)
 
 
 async def _ask_additional(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ask for optional additional fields after description is captured."""
+    """Start the optional additional fields section."""
+    context.user_data["additional_step"] = 0
     await update.message.reply_text(
-        "✅ Got it.\n\n"
         "━━━━━━━━━━━━━━━━\n"
         "A few more optional details.\n"
         "_(Send a dash — to skip any field)_\n\n"
-        "*Follow-up action:*\n"
+        "*[1/4] Follow-up action:*\n"
         "e.g. `2LT TAN will update BDO after appt on 080626`",
         parse_mode="Markdown",
     )
@@ -205,16 +272,15 @@ async def _ask_additional(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def enter_additional(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Collect follow-up, verbal report time, written report time, officer."""
+    """Collect follow-up action, verbal/written report times, and reporting officer."""
     text = update.message.text.strip()
-
-    # Walk through fields sequentially using a step counter
     step = context.user_data.get("additional_step", 0)
 
     if step == 0:
         context.user_data["follow_up_action"] = "" if text == "-" else text
         await update.message.reply_text(
-            "*Verbal report to GSOC date/time:*\ne.g. `010626 1830H`\n_(Send - to skip)_",
+            "*[2/4] Verbal report to GSOC date/time:*\n"
+            "e.g. `010626 0750H`\n_(Send - to skip)_",
             parse_mode="Markdown",
         )
         context.user_data["additional_step"] = 1
@@ -223,7 +289,8 @@ async def enter_additional(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif step == 1:
         context.user_data["verbal_report"] = "—" if text == "-" else text
         await update.message.reply_text(
-            "*Written report to GSOC date/time:*\ne.g. `010626 2100H`\n_(Send - to skip)_",
+            "*[3/4] Written report to GSOC date/time:*\n"
+            "e.g. `010626 0900H`\n_(Send - to skip)_",
             parse_mode="Markdown",
         )
         context.user_data["additional_step"] = 2
@@ -233,7 +300,9 @@ async def enter_additional(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["written_report"] = "—" if text == "-" else text
         profile = context.user_data["profile"]
         await update.message.reply_text(
-            f"*Reporting Officer:*\n_(Default: {profile['default_officer']})_\n\nSend - to use default.",
+            f"*[4/4] Reporting Officer:*\n"
+            f"_(Default: {profile['default_officer']})_\n\n"
+            "Send - to use default.",
             parse_mode="Markdown",
         )
         context.user_data["additional_step"] = 3
@@ -241,11 +310,9 @@ async def enter_additional(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif step == 3:
         profile = context.user_data["profile"]
-        if text == "-" or not text:
-            context.user_data["reporting_officer"] = profile["default_officer"]
-        else:
-            context.user_data["reporting_officer"] = text
-
+        context.user_data["reporting_officer"] = (
+            profile["default_officer"] if text == "-" or not text else text
+        )
         context.user_data.pop("additional_step", None)
         return await _generate_report(update, context)
 
@@ -267,7 +334,6 @@ async def _generate_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         context.user_data["generated_brief"] = brief
 
-        # Build preview
         mock_report = {
             "battalion": profile["battalion"],
             "coy": profile["coy"],
@@ -285,13 +351,12 @@ async def _generate_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         mock_version = {
             "brief_description": brief,
-            "follow_up_action": context.user_data.get("follow_up_action", "NIL"),
+            "follow_up_action": context.user_data.get("follow_up_action", "NIL") or "NIL",
             "reporting_officer": context.user_data.get("reporting_officer", ""),
         }
 
         preview = format_report_preview(mock_report, mock_version)
 
-        # Warn if transcript may be incomplete
         if "⚠️" in brief:
             preview += "\n\n⚠️ *Check carefully — transcript may be incomplete.*"
 
@@ -304,7 +369,8 @@ async def _generate_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         await update.message.reply_text(
-            f"⚠️ Generation failed: {e}\n\nTry again with /newir"
+            f"⚠️ *Generation failed:* `{e}`\n\nUse /newir to try again.",
+            parse_mode="Markdown",
         )
         return ConversationHandler.END
 
@@ -319,12 +385,12 @@ async def confirm_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✏️ Send your updated description (text or voice note):"
         )
         context.user_data.pop("generated_brief", None)
+        context.user_data.pop("additional_step", None)
         return ENTERING_DESCRIPTION
 
     if query.data == "ir_regen":
-        await query.edit_message_text("🔄 Regenerating...")
+        await query.edit_message_text("🔄 *Regenerating...*", parse_mode="Markdown")
         context.user_data.pop("generated_brief", None)
-        # Re-run generation
         profile = context.user_data["profile"]
         try:
             brief = generate_brief(
@@ -351,7 +417,7 @@ async def confirm_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
             mock_version = {
                 "brief_description": brief,
-                "follow_up_action": context.user_data.get("follow_up_action", "NIL"),
+                "follow_up_action": context.user_data.get("follow_up_action", "NIL") or "NIL",
                 "reporting_officer": context.user_data.get("reporting_officer", ""),
             }
             preview = format_report_preview(mock_report, mock_version)
@@ -362,7 +428,7 @@ async def confirm_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return CONFIRMING_REPORT
         except Exception as e:
-            await query.message.reply_text(f"⚠️ Regeneration failed: {e}")
+            await query.message.reply_text(f"⚠️ Regeneration failed: `{e}`", parse_mode="Markdown")
             return ConversationHandler.END
 
     if query.data == "ir_confirm":
@@ -376,7 +442,7 @@ async def confirm_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "battalion": profile["battalion"],
             "coy": profile["coy"],
             "ops_impact": "NIL",
-            "follow_up_action": context.user_data.get("follow_up_action", "NIL"),
+            "follow_up_action": context.user_data.get("follow_up_action", "NIL") or "NIL",
             "verbal_report": context.user_data.get("verbal_report", "—"),
             "written_report": context.user_data.get("written_report", "—"),
             "reporting_officer": context.user_data.get("reporting_officer", profile["default_officer"]),
@@ -395,12 +461,15 @@ async def confirm_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"*Report ID:* `{report_id}`\n"
                 f"*Individual:* {context.user_data['name']}\n"
                 f"*Type:* {context.user_data['type']}\n\n"
-                f"Use /dashboard to view all reports.\n"
-                f"Use /update to file a follow-up.",
+                "Use /dashboard to view all reports.\n"
+                "Use /update to file a follow-up.",
                 parse_mode="Markdown",
             )
         except Exception as e:
-            await query.edit_message_text(f"⚠️ Failed to save: {e}\n\nTry again with /newir")
+            await query.edit_message_text(
+                f"⚠️ Failed to save: `{e}`\n\nTry again with /newir",
+                parse_mode="Markdown",
+            )
 
         context.user_data.clear()
         return ConversationHandler.END
@@ -416,16 +485,33 @@ def new_ir_conv_handler():
     return ConversationHandler(
         entry_points=[CommandHandler("newir", new_ir)],
         states={
-            SELECTING_TYPE: [CallbackQueryHandler(select_type, pattern="^irtype_")],
-            ENTERING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_name)],
-            ENTERING_DATETIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_datetime)],
-            ENTERING_LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_location)],
+            SELECTING_TYPE: [
+                CallbackQueryHandler(select_type, pattern="^irtype_")
+            ],
+            ENTERING_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, enter_name)
+            ],
+            ENTERING_DATETIME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, enter_datetime)
+            ],
+            ENTERING_LOCATION: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, enter_location)
+            ],
             ENTERING_DESCRIPTION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, enter_description_text),
                 MessageHandler(filters.VOICE, enter_description_voice),
             ],
-            ENTERING_ADDITIONAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_additional)],
-            CONFIRMING_REPORT: [CallbackQueryHandler(confirm_report, pattern="^ir_")],
+            CONFIRM_TRANSCRIPT: [
+                CallbackQueryHandler(confirm_transcript, pattern="^tr_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_transcript_text),
+                MessageHandler(filters.VOICE, enter_description_voice),
+            ],
+            ENTERING_ADDITIONAL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, enter_additional)
+            ],
+            CONFIRMING_REPORT: [
+                CallbackQueryHandler(confirm_report, pattern="^ir_")
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         name="new_ir",

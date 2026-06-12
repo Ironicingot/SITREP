@@ -59,12 +59,25 @@ def generate_safety_insights(incident_summaries, battalion, week_label):
 
 
 def transcribe_voice(audio_file_path):
-    """Transcribe a voice note using Groq Whisper."""
+    """Transcribe a voice note using Groq Whisper.
+    
+    Groq requires the file to be passed as a tuple (filename, bytes, content_type)
+    so it can identify the audio format correctly.
+    Telegram voice notes are OGG OPUS format.
+    """
+    filename = os.path.basename(audio_file_path)
     with open(audio_file_path, "rb") as f:
-        transcription = client.audio.transcriptions.create(
-            file=f,
-            model="whisper-large-v3",  # Better accuracy than turbo
-            language="en",
-            response_format="text",
-        )
-    return transcription.strip()
+        audio_bytes = f.read()
+
+    transcription = client.audio.transcriptions.create(
+        file=(filename, audio_bytes, "audio/ogg"),
+        model="whisper-large-v3",
+        language="en",
+        response_format="text",
+    )
+
+    # Groq returns str directly when response_format="text"
+    if isinstance(transcription, str):
+        return transcription.strip()
+    # Fallback in case it returns an object
+    return transcription.text.strip()
