@@ -5,7 +5,8 @@ from datetime import datetime
 # Try to import Supabase — falls back to in-memory dict if not configured
 try:
     from supabase import create_client
-    SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+    SUPABASE_PROJECT_ID = os.environ.get("SUPABASE_PROJECT_ID", "")
+    SUPABASE_URL = f"https://{SUPABASE_PROJECT_ID}.supabase.co" if SUPABASE_PROJECT_ID else ""
     SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
     if SUPABASE_URL and SUPABASE_KEY:
         db = create_client(SUPABASE_URL, SUPABASE_KEY)
